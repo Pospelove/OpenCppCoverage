@@ -21,7 +21,7 @@
 #include <Windows.h>
 #include <map>
 #include <set>
-#include <boost/optional.hpp>
+#include <optional>
 
 #include "Plugin/Exporter/CoverageData.hpp"
 #include "CppCoverageExport.hpp"
@@ -46,7 +46,7 @@ namespace CppCoverage
 			unsigned int line,
 			unsigned char instruction);
 
-		boost::optional<unsigned char> MarkAddressAsExecuted(const Address&);
+		std::optional<unsigned char> MarkAddressAsExecuted(const Address&);
 
 		Plugin::CoverageData CreateCoverageData(const std::wstring& name, int exitCode) const;
 		void OnExitProcess(HANDLE hProcess);
