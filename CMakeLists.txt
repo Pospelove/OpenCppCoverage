@@ -98,7 +98,15 @@ foreach(tgt ${all})
 endforeach()
 
 target_link_libraries(OpenCppCoverage PRIVATE ${libs})
-add_dependencies(OpenCppCoverage copy_template)
+add_dependencies(OpenCppCoverage copy_template copy_msdia_dll)
 
 add_dependencies(coveragedata_pb protoc)
 add_dependencies(Exporter coveragedata_pb)
+
+# Make release
+set(output_file ${CMAKE_BINARY_DIR}/OpenCppCoverage.zip)
+set(input_files ${CMAKE_BINARY_DIR}/$<CONFIG>)
+add_custom_target(pack COMMAND
+  ${CMAKE_COMMAND} -E tar "cf" "${output_file}" --format=zip -- ${input_files}
+)
+add_dependencies(pack OpenCppCoverage)
