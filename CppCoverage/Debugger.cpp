@@ -26,6 +26,104 @@
 
 #include "Tools/Tool.hpp"
 
+#include <tlhelp32.h>
+#include <tchar.h>
+#include <psapi.h>
+
+#pragma comment( lib, "psapi.lib" )
+
+namespace
+{
+	std::vector<std::pair<std::wstring, void *>> GetModules(DWORD processID)
+	{
+		std::vector<std::pair<std::wstring, void *>> res;
+
+		HMODULE hMods[1024];
+		HANDLE hProcess;
+		DWORD cbNeeded;
+		unsigned int i;
+
+		// Print the process identifier.
+
+		//printf("\nProcess ID: %u\n", processID);
+
+		// Get a handle to the process.
+
+		hProcess = OpenProcess(PROCESS_QUERY_INFORMATION |
+			PROCESS_VM_READ,
+			FALSE, processID);
+		if (NULL == hProcess)
+			return {};
+
+		// Get a list of all the modules in this process.
+
+		if (EnumProcessModules(hProcess, hMods, sizeof(hMods), &cbNeeded))
+		{
+			for (i = 0; i < (cbNeeded / sizeof(HMODULE)); i++)
+			{
+				TCHAR szModName[MAX_PATH];
+
+				// Get the full path to the module's file.
+
+				if (GetModuleFileNameEx(hProcess, hMods[i], szModName,
+					sizeof(szModName) / sizeof(TCHAR)))
+				{
+					// Print the module name and handle value.
+
+					//_tprintf(TEXT("\t%s (0x%08X)\n"), szModName, hMods[i]);
+					res.push_back({ szModName, hMods[i] });
+				}
+			}
+		}
+
+		// Release the handle to the process.
+
+		CloseHandle(hProcess);
+
+		return res;
+	}
+
+	void ListProcessThreads(DWORD dwOwnerPID, std::vector<DWORD> *outThreadIds)
+	{
+		if (!outThreadIds)
+			throw std::runtime_error("outThreadIds was nullptr");
+		outThreadIds->clear();
+
+		HANDLE hThreadSnap = INVALID_HANDLE_VALUE;
+		THREADENTRY32 te32;
+
+		// Take a snapshot of all running threads  
+		hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+		if (hThreadSnap == INVALID_HANDLE_VALUE)
+			throw std::runtime_error("Invalid handle value");
+
+		// Fill in the size of the structure before using it. 
+		te32.dwSize = sizeof(THREADENTRY32);
+
+		// Retrieve information about the first thread,
+		// and exit if unsuccessful
+		if (!Thread32First(hThreadSnap, &te32))
+		{
+			CloseHandle(hThreadSnap);     // Must clean up the snapshot object!
+			throw std::runtime_error("Thread32First");
+		}
+
+		// Now walk the thread list of the system,
+		// and display information about each thread
+		// associated with the specified process
+		do
+		{
+			if (te32.th32OwnerProcessID == dwOwnerPID)
+			{
+				outThreadIds->push_back(te32.th32ThreadID);;
+			}
+		} while (Thread32Next(hThreadSnap, &te32));
+
+		//  Don't forget to clean up the snapshot object.
+		CloseHandle(hThreadSnap);
+	}
+}
+
 namespace CppCoverage
 {
 	//-------------------------------------------------------------------------
@@ -74,6 +172,119 @@ namespace CppCoverage
 	{
 		Process process(startInfo);
 		process.Start((coverChildren_) ? DEBUG_PROCESS: DEBUG_ONLY_THIS_PROCESS);
+
+		HANDLE rootProcessHandle = INVALID_HANDLE_VALUE;
+
+		if (auto pidPtr = process.GetAttachedProcessId()) {
+			DEBUG_EVENT debugEvent;
+			debugEvent.dwDebugEventCode = CREATE_PROCESS_DEBUG_EVENT;
+			debugEvent.dwProcessId = *pidPtr;
+
+			std::vector<DWORD> thrIds;
+			ListProcessThreads(*pidPtr, &thrIds);
+
+			std::vector<HANDLE> thrHandles;
+			for (auto thrId : thrIds)
+			{
+				auto handle = OpenThread(THREAD_QUERY_INFORMATION, false, thrId);
+				if (handle == INVALID_HANDLE_VALUE)
+					throw std::runtime_error("OpenThread returned INVALID_HANDLE_VALUE");
+				thrHandles.push_back(handle);
+			}
+			/*Tools::ScopedAction closeThrHandles([=] {
+				for (auto h : thrHandles)
+					CloseHandle(h);
+			});*/
+
+			int bestThreadIdx = -1;
+			uint64_t bestTime = ~0;
+
+			for (int i = 0; i < thrHandles.size(); ++i)
+			{
+				const auto h = thrHandles[i];
+
+				FILETIME creation, dummy;
+				auto ok = GetThreadTimes(h, &creation, &dummy, &dummy, &dummy);
+				if (!ok)
+					throw std::runtime_error("GetThreadTimes failed");
+
+				ULARGE_INTEGER ulargeCreation;
+				ulargeCreation.HighPart = creation.dwHighDateTime;
+				ulargeCreation.LowPart = creation.dwLowDateTime;
+
+				auto v = ulargeCreation.QuadPart;
+				if (v < bestTime)
+				{
+					bestTime = v;
+					bestThreadIdx = i;
+				}
+			}
+
+			auto p = startInfo.GetPath().wstring();
+			OFSTRUCT ofstruct;
+			
+			debugEvent.dwThreadId = thrIds[bestThreadIdx];
+			debugEvent.u.CreateProcessInfo.hFile = CreateFile(p.data(), GENERIC_READ,
+				FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+				NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+
+			if (debugEvent.u.CreateProcessInfo.hFile == INVALID_HANDLE_VALUE)
+			{
+				throw std::runtime_error("CreateFile failed");
+			}
+
+			debugEvent.u.CreateProcessInfo.hThread = thrHandles[bestThreadIdx];
+			rootProcessHandle = debugEvent.u.CreateProcessInfo.hProcess = 
+				OpenProcess(PROCESS_ALL_ACCESS, false, *pidPtr);
+			if (!rootProcessHandle)
+				throw std::runtime_error("OpenProcess failed");
+
+			debugEvent.u.CreateProcessInfo.lpBaseOfImage = 0;
+			// ...
+
+			///HandleDebugEvent(debugEvent, debugEventsHandler);
+
+			// Threads
+			for (int i = 0; i < thrHandles.size(); ++i)
+			{
+				if (i != bestThreadIdx)
+				{
+					DEBUG_EVENT de;
+					de.dwDebugEventCode = CREATE_THREAD_DEBUG_EVENT;
+					de.dwProcessId = *pidPtr;
+					de.dwThreadId = thrIds[i];
+					de.u.CreateThread.hThread = thrHandles[i];
+					de.u.CreateThread.lpStartAddress = 0;
+					de.u.CreateThread.lpThreadLocalBase = 0;
+					//HandleDebugEvent(de, debugEventsHandler);
+				}
+			
+			}
+
+			auto modules = GetModules(*pidPtr);
+
+			for (auto mod : modules)
+			{
+				if (mod.second == GetModuleHandle(NULL)) continue;
+
+				// DLLs
+				DEBUG_EVENT dllEvent;
+				dllEvent.dwDebugEventCode = LOAD_DLL_DEBUG_EVENT;
+				dllEvent.dwProcessId = *pidPtr;
+				dllEvent.dwThreadId = thrIds[bestThreadIdx];
+				dllEvent.u.LoadDll.lpBaseOfDll = mod.second;
+				dllEvent.u.LoadDll.hFile = CreateFile(mod.first.data(), GENERIC_READ,
+					FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+					NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+				if (dllEvent.u.LoadDll.hFile == INVALID_HANDLE_VALUE)
+				{
+					throw std::runtime_error("CreateFile for dll failed");
+				}
+
+				//dllEvent.u.LoadDll.
+				///HandleDebugEvent(dllEvent, debugEventsHandler);
+			}
+		}
 		
 		DEBUG_EVENT debugEvent;
 		boost::optional<int> exitCode;
@@ -84,8 +295,40 @@ namespace CppCoverage
 
 		while (!exitCode || !processHandles_.empty())
 		{
-			if (!WaitForDebugEvent(&debugEvent, INFINITE))
-				THROW_LAST_ERROR(L"Error WaitForDebugEvent:", GetLastError());
+			bool stopped = false;
+			while (1) 
+			{
+				if (!WaitForDebugEvent(&debugEvent, 1000))
+				{
+					auto err = GetLastError();
+					if (err != ERROR_SEM_TIMEOUT)
+					{
+						THROW_LAST_ERROR(L"Error WaitForDebugEvent:", GetLastError());
+					}
+
+					DWORD code;
+					if (!GetExitCodeProcess(rootProcessHandle, &code))
+					{
+						throw std::runtime_error("Error GetExitCodeProcess:" + std::to_string(GetLastError()));
+					}
+
+					if (code != STILL_ACTIVE)
+					{
+						printf("It seems process has exited\n");
+						exitCode = 108;
+						stopped = true;
+						break;
+					}
+				}
+				else {
+					break;
+				}
+			}
+
+			if (stopped)
+				break;
+
+			printf("Debug event %d\n", debugEvent.dwDebugEventCode);
 
 			ProcessStatus processStatus = HandleDebugEvent(debugEvent, debugEventsHandler);
 			

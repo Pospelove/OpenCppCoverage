@@ -26,6 +26,42 @@
 #include "StartInfo.hpp"
 #include "CppCoverageException.hpp"
 
+#include <tlhelp32.h>
+
+namespace
+{
+	std::wstring GetNameFromPath(wchar_t* path) 
+	{
+		wchar_t *lastSlash = path;
+
+		for (auto it = path; *it; ++it) 
+		{
+			if (*it == L'\\' || *it == L'/') 
+			{
+				lastSlash = it;
+			}
+		}
+
+		return lastSlash + 1;
+	}
+
+	std::vector<DWORD> GetProcIdsByName(wchar_t* proc_name)
+	{
+		PROCESSENTRY32 entry;
+		entry.dwSize = sizeof(PROCESSENTRY32);
+		std::vector<DWORD> ids;
+
+		HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, NULL);
+
+		if (Process32First(snapshot, &entry))
+			while (Process32Next(snapshot, &entry))
+				if (entry.szExeFile == (std::wstring)proc_name)
+					ids.push_back(entry.th32ProcessID);
+
+		return ids;
+	}
+}
+
 namespace CppCoverage
 {
 	namespace
@@ -94,18 +130,48 @@ namespace CppCoverage
 		auto commandLine = (optionalCommandLine) ? &(*optionalCommandLine)[0] : nullptr;
 
 		processInformation_ = PROCESS_INFORMATION{};
-		if (!CreateProcess(
-			nullptr,
-			commandLine,
-			nullptr,
-			nullptr,
-			FALSE,
-			creationFlags,
-			nullptr,
-			(workindDirectory) ? workindDirectory->c_str() : nullptr,
-			&lpStartupInfo,
-			&processInformation_.get()
-			))
+
+		std::string attach;
+		if (auto s = getenv("OpenCppCoverage_Attach")) 
+		{
+			attach = s;
+		}
+
+		BOOL success = TRUE; 
+		if (attach == "1") 
+		{
+			auto name = GetNameFromPath(commandLine);
+
+			auto ids = GetProcIdsByName(L"TESV.exe");
+
+			if (ids.size() != 1)
+				throw std::runtime_error("ids.size() == " + std::to_string(ids.size()));
+
+			auto processId = ids.front();
+
+			if (!DebugActiveProcess(processId)) {
+				throw std::runtime_error("DebugActiveProcess failed");
+			}
+
+			attachedProcessId_ = new DWORD(processId);
+		}
+		else 
+		{
+			success = CreateProcess(
+				nullptr,
+				commandLine,
+				nullptr,
+				nullptr,
+				FALSE,
+				creationFlags,
+				nullptr,
+				(workindDirectory) ? workindDirectory->c_str() : nullptr,
+				&lpStartupInfo,
+				&processInformation_.get()
+			);
+		}
+
+		if (!success)
 		{
 			std::wostringstream ostr;
 

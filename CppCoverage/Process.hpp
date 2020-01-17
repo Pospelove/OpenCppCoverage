@@ -35,6 +35,11 @@ namespace CppCoverage
 		
 		void Start(DWORD creationFlags);
 
+		DWORD *GetAttachedProcessId() const
+		{
+			return attachedProcessId_;
+		}
+
 	private:
 		Process(const Process&) = delete;
 		Process& operator=(const Process&) = delete;
@@ -42,6 +47,7 @@ namespace CppCoverage
 	private:
 		boost::optional<PROCESS_INFORMATION> processInformation_;
 		const StartInfo startInfo_;
+		DWORD *attachedProcessId_ = nullptr;
 	};
 }
 
