@@ -8,9 +8,9 @@ set(vcpkg_ref 61e2cac730cc8b16c9373c6c463a335a21a1496a)
 
 pmm(VCPKG
   REVISION ${vcpkg_ref}
-  REQUIRES boost-log boost-program-options boost-uuid boost-iostreams boost-locale poco protobuf gtest
+  REQUIRES boost-log boost-program-options boost-uuid boost-iostreams boost-locale boost-thread poco protobuf gtest
 )
-find_package(Boost REQUIRED COMPONENTS log program_options iostreams locale)
+find_package(Boost REQUIRED COMPONENTS log program_options iostreams locale thread)
 find_package(Protobuf REQUIRED)
 
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/CMake/ctemplate_patch/CMakeLists.txt DESTINATION ${_VCPKG_ROOT_DIR}/ports/ctemplate)
